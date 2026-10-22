@@ -3,7 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Lab Topology · Firewall Packet Simulation</title>
 <style>
-:root{color-scheme:dark;--bg:#0b111a;--panel:#0f1724;--line:#1f2b3d;--tx:#cbd5e1;--mut:#64748b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+:root{color-scheme:dark;--bg:#0a0f17;--panel:#0f1724;--line:#1f2b3d;--tx:#cbd5e1;--mut:#64748b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 html,body{margin:0;background:var(--bg);color:var(--tx);font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 header{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
 h1{margin:0;font-size:13px;letter-spacing:.18em;font-weight:500;color:var(--mut)}
@@ -15,15 +15,13 @@ h1{margin:0;font-size:13px;letter-spacing:.18em;font-weight:500;color:var(--mut)
 #fwb.allow{border-color:#22c55e;color:#4ade80}
 #fwb.block{border-color:#ef4444;color:#f87171}
 .wrap{overflow-x:auto}
-canvas{display:block;min-width:1100px;width:100%;height:600px}
-#log{min-width:1060px;margin:0 22px 18px;padding:10px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);height:130px;overflow:hidden;line-height:1.7;color:var(--mut)}
-#log b{font-weight:600}
+canvas{display:block;min-width:1100px;width:100%;height:620px}
 </style></head><body>
 <header><h1>PHYSICAL TOPOLOGY · LIVE PACKET SIMULATION · CLICK THE FIREWALL TO BLOCK / ALLOW</h1>
 <div class="leg" id="leg"></div></header>
-<div class="wrap"><canvas id="c"></canvas><div id="log"></div></div>
+<div class="wrap"><canvas id="c"></canvas></div>
 <script>
-const cv=document.getElementById('c'),ctx=cv.getContext('2d'),logEl=document.getElementById('log');
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
 const NODES={
  kali:{name:'Kali Linux',role:'ATTACKER · OFFENSIVE · EXTERNAL',ip:'192.168.1.47',host:'kali',spec:'4 vCPU · 8 GB · 120 GB',c:'#ef4444'},
  agent:{name:'Ubuntu (agent)',role:'MONITORING & DEFENSIVE CONTROLS',ip:'192.168.1.46',host:'Ubuntu_agent',spec:'4 vCPU · 8 GB · 75 GB',c:'#3b82f6'},
@@ -32,73 +30,82 @@ const NODES={
 };
 const VMS=['agent','msf','soc'];
 const FLOWS=[
- {id:'attack',label:'attack (inbound)',c:'#ef4444',path:['kali','msf'],rate:2.2,msgs:['tcp/445 SMB exploit','tcp/21 vsftpd backdoor','tcp/80 nmap -sV scan','tcp/3632 distcc exec','tcp/1524 bindshell','tcp/6667 unrealircd']},
- {id:'shell',label:'reverse shell (outbound)',c:'#a855f7',path:['msf','kali'],rate:.7,msgs:['tcp/4444 reverse shell','tcp/443 C2 beacon']},
- {id:'wazuh',label:'agent telemetry',c:'#3b82f6',path:['agent','soc'],rate:1.2,msgs:['tcp/1514 agent events','tcp/1515 keepalive','tcp/1514 FIM + logs']},
- {id:'mirror',label:'monitor / mirror',c:'#f59e0b',path:['msf','agent'],rate:.9,msgs:['SPAN copy of target traffic','pcap stream to sensor']},
- {id:'alert',label:'alert / response',c:'#22c55e',path:['soc','agent'],rate:.5,msgs:['active-response command','rule + decoder update']}
+ {id:'attack',label:'attack (inbound)',c:'#ef4444',path:['kali','msf'],rate:2.2,tags:['SMB','FTP','HTTP','DISTCC','TCP/1524','IRC','SYN']},
+ {id:'shell',label:'reverse shell (outbound)',c:'#a855f7',path:['msf','kali'],rate:.7,tags:['TCP/4444','HTTPS']},
+ {id:'wazuh',label:'agent telemetry',c:'#3b82f6',path:['agent','soc'],rate:1.2,tags:['1514','1515','FIM']},
+ {id:'mirror',label:'monitor / mirror',c:'#f59e0b',path:['msf','agent'],rate:.9,tags:['SPAN','PCAP']},
+ {id:'alert',label:'alert / response',c:'#22c55e',path:['soc','agent'],rate:.5,tags:['ACTIVE-RESP','RULES']}
 ];
 const on={};FLOWS.forEach(f=>on[f.id]=true);
 const leg=document.getElementById('leg');
 FLOWS.forEach(f=>{const b=document.createElement('button');b.className='chip';b.style.setProperty('--c',f.c);b.innerHTML='<i></i>'+f.label;b.onclick=()=>{on[f.id]=!on[f.id];b.classList.toggle('off',!on[f.id])};leg.appendChild(b)});
-let paused=false,blocked=false;const stats={pass:0,drop:0};
-const fwb=document.createElement('button');fwb.className='chip allow';fwb.id='fwb';leg.appendChild(fwb);
+let paused=false,blocked=false,T=0;const stats={pass:0,drop:0};
+const fwb=document.createElement('button');fwb.id='fwb';leg.appendChild(fwb);
 function setFw(){fwb.className='chip '+(blocked?'block':'allow');fwb.textContent='firewall: '+(blocked?'BLOCKING':'ALLOWING')}
-function toggleFw(){blocked=!blocked;setFw();addRaw(`<b style="color:${blocked?'#f87171':'#4ade80'}">[firewall]</b> policy changed → ${blocked?'BLOCK all traffic crossing the firewall':'ALLOW traffic'}`)}
+function toggleFw(){blocked=!blocked;setFw()}
 fwb.onclick=toggleFw;setFw();
 const pb=document.createElement('button');pb.className='chip';pb.textContent='pause';pb.onclick=()=>{paused=!paused;pb.textContent=paused?'resume':'pause'};leg.appendChild(pb);
 
 let W=0,H=0,G={};
 function layout(){
  const dpr=window.devicePixelRatio||1;W=cv.clientWidth;H=cv.clientHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);
- const cy=H/2+8,vx=770,vw=W-vx-44,vh=130;
- G={cy,K:{x:24,w:200,y:cy-70,h:140},cloud:{x:304,rx:48,ry:32},FW:{x:410,w:130,y:cy-90,h:180},SW:{x:612,w:104,y:cy-45,h:90},bx:742,vx,vw,vh};
+ const cy=H/2+8,vx=770,vw=W-vx-44,vh=140;
+ G={cy,K:{x:24,w:200,y:cy-70,h:140},cloud:{x:304,rx:48,ry:32},FW:{x:410,w:130,y:cy-95,h:190},SW:{x:612,w:104,y:cy-45,h:90},bx:742};
  G.K.cy=cy;G.K.R=G.K.x+G.K.w;
- VMS.forEach((k,i)=>{const n=NODES[k];n.x=vx;n.y=96+i*(vh+20);n.w=vw;n.h=vh;n.cy=n.y+vh/2;n.flash=0});
- NODES.kali.flash=NODES.kali.flash||0;
-}
-function route(f){
- const [a,b]=f.path,{K,FW,SW,bx,cy}=G,A=NODES[a],B=NODES[b];let pts,fw=-1,sw=3;
- if(a==='kali'){pts=[[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];fw=1}
- else if(b==='kali'){pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[SW.x,cy],[FW.x+FW.w,cy],[FW.x,cy],[K.R,cy]];fw=5;sw=3}
- else pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];
- return{pts,fw:fw<0?-1:dist(pts,fw),sw:dist(pts,sw)}
+ VMS.forEach((k,i)=>{const n=NODES[k];n.x=vx;n.y=92+i*(vh+18);n.w=vw;n.h=vh;n.cy=n.y+vh/2});
+ Object.values(NODES).forEach((n,i)=>{n.flash=n.flash||0;n.cpu=n.cpu||25+i*9;n.mem=n.mem||40+i*8;n.ph=i*1.7});
 }
 function dist(p,idx){let t=0;for(let i=1;i<=idx;i++)t+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);return t}
 function plen(p){return dist(p,p.length-1)}
+function route(f){
+ const [a,b]=f.path,{K,FW,SW,bx,cy}=G,A=NODES[a],B=NODES[b];let pts,fw=-1;
+ if(a==='kali'){pts=[[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];fw=1}
+ else if(b==='kali'){pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[SW.x,cy],[FW.x+FW.w,cy],[FW.x,cy],[K.R,cy]];fw=5}
+ else pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];
+ return{pts,fw:fw<0?-1:dist(pts,fw),swd:dist(pts,3)}
+}
 function at(p,d){for(let i=1;i<p.length;i++){const l=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);if(d<=l||i==p.length-1){const u=l?Math.min(d/l,1):0;return[p[i-1][0]+(p[i][0]-p[i-1][0])*u,p[i-1][1]+(p[i][1]-p[i-1][1])*u]}d-=l}return p[0]}
-const pk=[],acc={},fx=[],logs=[];let swF=0,fwF=0;
+const pk=[],acc={},fx=[];let swF=0,fwF=0;
 function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
 function fit(t,w,px){const m=Math.floor(w/px);return t.length>m?t.slice(0,m-1)+'…':t}
+function line(x1,y1,x2,y2){ctx.moveTo(x1,y1);ctx.lineTo(x2,y2)}
+function led(x,y,c,r,a){ctx.globalAlpha=a==null?1:a;ctx.fillStyle=c;ctx.shadowColor=c;ctx.shadowBlur=6;ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();ctx.shadowBlur=0;ctx.globalAlpha=1}
+function bar(x,y,w,v,c,lab){ctx.fillStyle='#64748b';ctx.font='8px ui-monospace,monospace';ctx.fillText(lab,x,y+5);ctx.fillStyle='#1a2536';rr(x+26,y,w-26,5,2);ctx.fill();ctx.fillStyle=c;rr(x+26,y,(w-26)*v/100,5,2);ctx.fill()}
 function card(n,x,y,w,h){
- ctx.fillStyle='#0f1724';rr(x,y,w,h,8);ctx.fill();
+ ctx.fillStyle='#101a2b';rr(x,y,w,h,8);ctx.fill();
  ctx.strokeStyle=n.c;ctx.globalAlpha=.35+.65*n.flash;ctx.lineWidth=1.4+1.6*n.flash;rr(x,y,w,h,8);ctx.stroke();ctx.globalAlpha=1;
  ctx.fillStyle=n.c;ctx.fillRect(x,y+8,4,h-16);
  ctx.fillStyle='#e2e8f0';ctx.font='600 14px ui-monospace,monospace';ctx.fillText(n.name,x+16,y+26);
- ctx.fillStyle='#64748b';ctx.font='9.5px ui-monospace,monospace';ctx.fillText(fit(n.role,w-24,5.8),x+16,y+42);
- ctx.fillStyle=n.c;ctx.font='600 13px ui-monospace,monospace';ctx.fillText(n.ip,x+16,y+70);
- ctx.fillStyle='#94a3b8';ctx.font='11px ui-monospace,monospace';ctx.fillText('host: '+n.host,x+16,y+94);ctx.fillText(n.spec,x+16,y+114);
+ led(x+w-16,y+20,'#22c55e',3.5,.55+.45*Math.sin(T*3+n.ph));
+ ctx.fillStyle='#64748b';ctx.font='9.5px ui-monospace,monospace';ctx.fillText(fit(n.role,w-40,5.8),x+16,y+42);
+ ctx.fillStyle=n.c;ctx.font='600 13px ui-monospace,monospace';ctx.fillText(n.ip,x+16,y+68);
+ ctx.fillStyle='#94a3b8';ctx.font='11px ui-monospace,monospace';ctx.fillText('host: '+n.host,x+16,y+88);ctx.fillText(n.spec,x+16,y+106);
+ bar(x+16,y+h-20,w-32,n.cpu,'#38bdf8','CPU');bar(x+16,y+h-11,w-32,n.mem,'#a78bfa','MEM');
  n.flash=Math.max(0,n.flash-.03)}
-function line(x1,y1,x2,y2){ctx.moveTo(x1,y1);ctx.lineTo(x2,y2)}
 function draw(){
  const {cy,K,FW,SW,bx,cloud}=G;ctx.clearRect(0,0,W,H);ctx.textAlign='left';
+ ctx.strokeStyle='rgba(148,163,184,.045)';ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<W;x+=40)line(x,0,x,H);for(let y=0;y<H;y+=40)line(0,y,W,y);ctx.stroke();
  // Internet zone
  ctx.setLineDash([6,5]);ctx.strokeStyle='#5b2a2a';ctx.lineWidth=1.2;rr(14,cy-130,FW.x-44,260,12);ctx.stroke();ctx.setLineDash([]);
  ctx.fillStyle='#ef4444';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('INTERNET · UNTRUSTED ZONE',30,cy-108);
- // ESXi frame
- const ex=580;ctx.strokeStyle='#26354d';ctx.lineWidth=1.2;rr(ex,56,W-ex-24,H-80,12);ctx.stroke();
+ // ESXi rack
+ const ex=580,ew=W-ex-24;ctx.fillStyle='#0c1320';rr(ex,56,ew,H-80,12);ctx.fill();ctx.strokeStyle='#2b3b55';ctx.lineWidth=1.5;rr(ex,56,ew,H-80,12);ctx.stroke();
+ [[ex+10,66],[ex+ew-10,66],[ex+10,H-34],[ex+ew-10,H-34]].forEach(s=>{ctx.fillStyle='#2b3b55';ctx.beginPath();ctx.arc(s[0],s[1],2.5,0,7);ctx.fill()});
  ctx.fillStyle='#1e3a5f';rr(ex+14,44,150,24,5);ctx.fill();ctx.fillStyle='#cbd5e1';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('VMware ESXi 7.0 U2 Host',ex+24,60);
- ctx.fillStyle='#64748b';ctx.font='11px ui-monospace,monospace';ctx.textAlign='right';ctx.fillText('Isolated Lab Network · 192.168.1.0/24',W-36,78);ctx.textAlign='left';
- // links
- ctx.strokeStyle='#26354d';ctx.lineWidth=2;ctx.beginPath();
- line(K.R,cy,FW.x,cy);line(FW.x+FW.w,cy,SW.x,cy);line(SW.x+SW.w,cy,bx,cy);line(bx,NODES.agent.cy,bx,NODES.soc.cy);VMS.forEach(k=>line(bx,NODES[k].cy,NODES[k].x,NODES[k].cy));ctx.stroke();
+ led(ex+180,56,'#22c55e',3,.6+.4*Math.sin(T*2));led(ex+192,56,'#f59e0b',3,Math.sin(T*9)>0?1:.25);
+ ctx.fillStyle='#64748b';ctx.font='11px ui-monospace,monospace';ctx.textAlign='right';ctx.fillText('Isolated Lab Network · 192.168.1.0/24',W-36,80);ctx.textAlign='left';
+ // cables (patch-cable look)
+ const cab=(pts,col)=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.strokeStyle=col;ctx.stroke()};
+ const segs=[[[K.R,cy],[FW.x,cy]],[[FW.x+FW.w,cy],[SW.x,cy]],[[SW.x+SW.w,cy],[bx,cy]],[[bx,NODES.agent.cy],[bx,NODES.soc.cy]],...VMS.map(k=>[[bx,NODES[k].cy],[NODES[k].x,NODES[k].cy]])];
+ ctx.lineCap='round';segs.forEach(s=>{ctx.lineWidth=5;cab(s,'#070b12');ctx.lineWidth=3;cab(s,'#2a3a55');ctx.lineWidth=1;cab(s,'#3f5578')});
+ [[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],...VMS.map(k=>[NODES[k].x,NODES[k].cy])].forEach(p=>{ctx.fillStyle='#0a0f17';ctx.strokeStyle='#4b6084';ctx.lineWidth=1;rr(p[0]-4,p[1]-5,8,10,2);ctx.fill();ctx.stroke()});
  // cloud
  ctx.fillStyle='#0d1626';ctx.strokeStyle='#3a4a63';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(cloud.x,cy,cloud.rx,cloud.ry,0,0,7);ctx.fill();ctx.stroke();
  ctx.fillStyle='#e2e8f0';ctx.font='600 13px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText('Internet',cloud.x,cy+1);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('WAN',cloud.x,cy+15);ctx.textAlign='left';
- // firewall
+ // firewall appliance
  const col=blocked?'#ef4444':'#22c55e';
  ctx.fillStyle=blocked?'#1a0d12':'#0c1a14';rr(FW.x,FW.y,FW.w,FW.h,8);ctx.fill();
- ctx.save();rr(FW.x,FW.y,FW.w,FW.h,8);ctx.clip();ctx.strokeStyle=blocked?'rgba(239,68,68,.22)':'rgba(34,197,94,.14)';ctx.lineWidth=1;ctx.beginPath();
+ ctx.save();rr(FW.x,FW.y,FW.w,FW.h,8);ctx.clip();ctx.strokeStyle=blocked?'rgba(239,68,68,.2)':'rgba(34,197,94,.12)';ctx.lineWidth=1;ctx.beginPath();
  for(let y=FW.y+18;y<FW.y+FW.h;y+=18){line(FW.x,y,FW.x+FW.w,y);for(let x=FW.x+(((y-FW.y)/18)%2?0:22);x<FW.x+FW.w;x+=44)line(x,y-18,x,y)}ctx.stroke();ctx.restore();
  ctx.strokeStyle=col;ctx.lineWidth=2+2*fwF;rr(FW.x,FW.y,FW.w,FW.h,8);ctx.stroke();fwF=Math.max(0,fwF-.04);
  ctx.fillStyle='#0b111a';rr(FW.x+10,FW.y+10,FW.w-20,92,6);ctx.fill();
@@ -107,35 +114,37 @@ function draw(){
  ctx.font='700 12px ui-monospace,monospace';ctx.fillText(blocked?'● BLOCKING':'● ALLOWING',mx,FW.y+50);
  ctx.fillStyle='#4ade80';ctx.font='10.5px ui-monospace,monospace';ctx.fillText('passed '+stats.pass,mx,FW.y+72);
  ctx.fillStyle='#f87171';ctx.fillText('dropped '+stats.drop,mx,FW.y+90);
- ctx.fillStyle='#94a3b8';ctx.font='10px ui-monospace,monospace';ctx.fillText('click to',mx,FW.y+128);ctx.fillText(blocked?'ALLOW':'BLOCK',mx,FW.y+142);ctx.textAlign='left';
+ ctx.fillStyle='#94a3b8';ctx.font='10px ui-monospace,monospace';ctx.fillText('click to '+(blocked?'ALLOW':'BLOCK'),mx,FW.y+124);ctx.textAlign='left';
+ for(let i=0;i<8;i++){const a=Math.sin(T*(4+i*1.3)+i*2)>.1;led(FW.x+17+i*13.7,FW.y+FW.h-22,blocked?'#ef4444':(i%3==2?'#f59e0b':'#22c55e'),2.8,a?1:.2)}
  // switch
  ctx.fillStyle='#0d1626';ctx.strokeStyle='#3b5b8c';ctx.lineWidth=1.5;rr(SW.x,SW.y,SW.w,SW.h,8);ctx.fill();ctx.stroke();
- ctx.fillStyle='#93c5fd';ctx.font='600 13px ui-monospace,monospace';ctx.fillText('vSwitch',SW.x+14,SW.y+34);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('VM Network',SW.x+14,SW.y+54);
+ ctx.fillStyle='#93c5fd';ctx.font='600 13px ui-monospace,monospace';ctx.fillText('vSwitch',SW.x+14,SW.y+30);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('VM Network',SW.x+14,SW.y+48);
+ for(let i=0;i<8;i++)led(SW.x+16+i*10.5,SW.y+SW.h-14,'#22c55e',2.2,Math.sin(T*(5+i)+i)>0?1:.25);
  if(swF>0){ctx.strokeStyle='rgba(147,197,253,'+swF+')';ctx.lineWidth=2;rr(SW.x-3,SW.y-3,SW.w+6,SW.h+6,10);ctx.stroke()}swF=Math.max(0,swF-.05);
  card(NODES.kali,K.x,K.y,K.w,K.h);VMS.forEach(k=>{const n=NODES[k];card(n,n.x,n.y,n.w,n.h)});
  ctx.fillStyle='#ef4444';ctx.font='10px ui-monospace,monospace';ctx.fillText('via Internet → Firewall → vSwitch',K.x,K.y+K.h+18);
 }
-function addRaw(h){logs.push(`<span style="color:var(--mut)">${new Date().toLocaleTimeString('en-GB')}</span> ${h}`);if(logs.length>6)logs.shift();logEl.innerHTML=logs.join('<br>')}
-function addLog(f,m,a,b,tag){addRaw(`<b style="color:${f.c}">[${f.label}]</b> ${NODES[a].ip} → ${NODES[b].ip} · ${m}${tag||''}`)}
-cv.addEventListener('click',e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;if(x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h)toggleFw()});
-cv.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;cv.style.cursor=(x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h)?'pointer':'default'});
+function hit(e){const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;return x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h}
+cv.addEventListener('click',e=>{if(hit(e))toggleFw()});
+cv.addEventListener('mousemove',e=>{cv.style.cursor=hit(e)?'pointer':'default'});
 let last=performance.now();
 function frame(now){
- const dt=Math.min(.05,(now-last)/1000);last=now;
+ const dt=Math.min(.05,(now-last)/1000);last=now;T=now/1000;
  if(!paused){
   FLOWS.forEach(f=>{if(!on[f.id])return;acc[f.id]=(acc[f.id]||0)+dt*f.rate;
-   while(acc[f.id]>=1){acc[f.id]--;pk.push({f,d:0,m:f.msgs[Math.random()*f.msgs.length|0],v:200+Math.random()*60})}});
-  for(let i=pk.length-1;i>=0;i--){const p=pk[i],r=route(p.f);Object.assign(p,r);p.pts=r.pts;p.d+=p.v*dt;
-   if(p.fw>=0&&!p.chk&&p.d>=p.fw){p.chk=1;
-    if(blocked){const [x,y]=at(p.pts,p.fw);fx.push({x,y,life:1});stats.drop++;fwF=1;addLog(p.f,p.m,p.f.path[0],p.f.path[1],' <b style="color:#f87171">— DROPPED at firewall</b>');pk.splice(i,1);continue}
+   while(acc[f.id]>=1){acc[f.id]--;pk.push({f,d:0,tag:f.tags[Math.random()*f.tags.length|0],v:200+Math.random()*60})}});
+  Object.values(NODES).forEach(n=>{n.cpu=Math.max(8,Math.min(95,n.cpu+(Math.random()-.5)*60*dt));n.mem=Math.max(20,Math.min(90,n.mem+(Math.random()-.5)*20*dt))});
+  for(let i=pk.length-1;i>=0;i--){const p=pk[i],r=route(p.f);p.pts=r.pts;p.d+=p.v*dt;
+   if(r.fw>=0&&!p.chk&&p.d>=r.fw){p.chk=1;
+    if(blocked){const [x,y]=at(p.pts,r.fw);fx.push({x,y,life:1});stats.drop++;fwF=1;pk.splice(i,1);continue}
     stats.pass++}
-   if(!p.sw&&p.d>=p.sw){p.sw=1}
-   if(!p.swd&&p.d>=r.sw){p.swd=1;swF=1}
-   if(p.d>=plen(p.pts)){NODES[p.f.path[1]].flash=1;addLog(p.f,p.m,p.f.path[0],p.f.path[1],p.fw>=0?' <b style="color:#4ade80">✓ passed firewall</b>':'');pk.splice(i,1)}}
+   if(!p.swd&&p.d>=r.swd){p.swd=1;swF=1}
+   if(p.d>=plen(p.pts)){NODES[p.f.path[1]].flash=1;pk.splice(i,1)}}
   fx.forEach(e=>e.life-=dt*.8);for(let i=fx.length-1;i>=0;i--)if(fx[i].life<=0)fx.splice(i,1);
  }
  draw();
- pk.forEach(p=>{for(let k=9;k>=0;k--){const d=p.d-k*7;if(d<0)continue;const [x,y]=at(p.pts,d);ctx.globalAlpha=(1-k/10)*.9;ctx.fillStyle=p.f.c;ctx.beginPath();ctx.arc(x,y,k?3.2-k*.18:4.6,0,7);ctx.fill()}ctx.globalAlpha=1});
+ pk.forEach(p=>{let hx=0,hy=0;for(let k=9;k>=0;k--){const d=p.d-k*7;if(d<0)continue;const [x,y]=at(p.pts,d);if(!k){hx=x;hy=y}ctx.globalAlpha=(1-k/10)*.9;ctx.fillStyle=p.f.c;ctx.beginPath();ctx.arc(x,y,k?3.2-k*.18:4.6,0,7);ctx.fill()}
+  ctx.globalAlpha=.85;ctx.fillStyle=p.f.c;ctx.font='8.5px ui-monospace,monospace';ctx.fillText(p.tag,hx+7,hy-7);ctx.globalAlpha=1});
  fx.forEach(e=>{ctx.globalAlpha=Math.max(0,e.life);ctx.strokeStyle='#ef4444';ctx.lineWidth=3;const s=7+(1-e.life)*8;ctx.beginPath();line(e.x-s,e.y-s,e.x+s,e.y+s);line(e.x-s,e.y+s,e.x+s,e.y-s);ctx.stroke();ctx.globalAlpha=1});
  requestAnimationFrame(frame)}
 addEventListener('resize',layout);layout();requestAnimationFrame(frame);
