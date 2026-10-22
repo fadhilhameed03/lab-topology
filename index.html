@@ -30,8 +30,8 @@ const NODES={
 };
 const VMS=['agent','msf','soc'];
 const FLOWS=[
- {id:'attack',label:'attack (inbound)',c:'#ef4444',path:['kali','msf'],rate:2.2,tags:['SMB','FTP','HTTP','DISTCC','TCP/1524','IRC','SYN']},
- {id:'shell',label:'reverse shell (outbound)',c:'#a855f7',path:['msf','kali'],rate:.7,tags:['TCP/4444','HTTPS']},
+ {id:'attack',label:'attack (inbound)',c:'#ef4444',path:['kali','msf'],to:['msf','agent'],rate:2.6,tags:['SMB','FTP','HTTP','DISTCC','TCP/1524','IRC','SYN']},
+ {id:'shell',label:'outbound (lab → Internet)',c:'#a855f7',path:['msf','kali'],from:['msf','agent','soc'],rate:.9,tags:['TCP/4444','HTTPS','DNS','NTP','UPDATE']},
  {id:'wazuh',label:'agent telemetry',c:'#3b82f6',path:['agent','soc'],rate:1.2,tags:['1514','1515','FIM']},
  {id:'mirror',label:'monitor / mirror',c:'#f59e0b',path:['msf','agent'],rate:.9,tags:['SPAN','PCAP']},
  {id:'alert',label:'alert / response',c:'#22c55e',path:['soc','agent'],rate:.5,tags:['ACTIVE-RESP','RULES']}
@@ -39,10 +39,12 @@ const FLOWS=[
 const on={};FLOWS.forEach(f=>on[f.id]=true);
 const leg=document.getElementById('leg');
 FLOWS.forEach(f=>{const b=document.createElement('button');b.className='chip';b.style.setProperty('--c',f.c);b.innerHTML='<i></i>'+f.label;b.onclick=()=>{on[f.id]=!on[f.id];b.classList.toggle('off',!on[f.id])};leg.appendChild(b)});
-let paused=false,blocked=false,T=0;const stats={pass:0,drop:0};
+let paused=false,T=0;const rules={attack:false,shell:false};const stats={pass:0,drop:0};
 const fwb=document.createElement('button');fwb.id='fwb';leg.appendChild(fwb);
-function setFw(){fwb.className='chip '+(blocked?'block':'allow');fwb.textContent='firewall: '+(blocked?'BLOCKING':'ALLOWING')}
-function toggleFw(){blocked=!blocked;setFw()}
+function anyB(){return rules.attack||rules.shell}
+function setFw(){fwb.className='chip '+(rules.attack?'block':'allow');fwb.textContent='Kali traffic: '+(rules.attack?'BLOCKED':'ALLOWED')}
+function toggleRule(k){rules[k]=!rules[k];setFw()}
+function toggleFw(){toggleRule('attack')}
 fwb.onclick=toggleFw;setFw();
 const pb=document.createElement('button');pb.className='chip';pb.textContent='pause';pb.onclick=()=>{paused=!paused;pb.textContent=paused?'resume':'pause'};leg.appendChild(pb);
 
@@ -57,8 +59,8 @@ function layout(){
 }
 function dist(p,idx){let t=0;for(let i=1;i<=idx;i++)t+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);return t}
 function plen(p){return dist(p,p.length-1)}
-function route(f){
- const [a,b]=f.path,{K,FW,SW,bx,cy}=G,A=NODES[a],B=NODES[b];let pts,fw=-1;
+function route(f,to,fr){
+ const a=fr||f.path[0],b=to||f.path[1],{K,FW,SW,bx,cy}=G,A=NODES[a],B=NODES[b];let pts,fw=-1;
  if(a==='kali'){pts=[[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];fw=1}
  else if(b==='kali'){pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[SW.x,cy],[FW.x+FW.w,cy],[FW.x,cy],[K.R,cy]];fw=5}
  else pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];
@@ -86,8 +88,8 @@ function draw(){
  const {cy,K,FW,SW,bx,cloud}=G;ctx.clearRect(0,0,W,H);ctx.textAlign='left';
  ctx.strokeStyle='rgba(148,163,184,.045)';ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<W;x+=40)line(x,0,x,H);for(let y=0;y<H;y+=40)line(0,y,W,y);ctx.stroke();
  // Internet zone
- ctx.setLineDash([6,5]);ctx.strokeStyle='#5b2a2a';ctx.lineWidth=1.2;rr(14,cy-130,FW.x-44,260,12);ctx.stroke();ctx.setLineDash([]);
- ctx.fillStyle='#ef4444';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('INTERNET · UNTRUSTED ZONE',30,cy-108);
+ ctx.setLineDash([6,5]);ctx.strokeStyle='#5b2a2a';ctx.lineWidth=1.2;rr(14,cy-104,K.w+20,208,12);ctx.stroke();ctx.setLineDash([]);
+ ctx.fillStyle='#ef4444';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('EXTERNAL ATTACKER',30,cy-84);
  // ESXi rack
  const ex=580,ew=W-ex-24;ctx.fillStyle='#0c1320';rr(ex,56,ew,H-80,12);ctx.fill();ctx.strokeStyle='#2b3b55';ctx.lineWidth=1.5;rr(ex,56,ew,H-80,12);ctx.stroke();
  [[ex+10,66],[ex+ew-10,66],[ex+10,H-34],[ex+ew-10,H-34]].forEach(s=>{ctx.fillStyle='#2b3b55';ctx.beginPath();ctx.arc(s[0],s[1],2.5,0,7);ctx.fill()});
@@ -100,10 +102,11 @@ function draw(){
  ctx.lineCap='round';segs.forEach(s=>{ctx.lineWidth=5;cab(s,'#070b12');ctx.lineWidth=3;cab(s,'#2a3a55');ctx.lineWidth=1;cab(s,'#3f5578')});
  [[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],...VMS.map(k=>[NODES[k].x,NODES[k].cy])].forEach(p=>{ctx.fillStyle='#0a0f17';ctx.strokeStyle='#4b6084';ctx.lineWidth=1;rr(p[0]-4,p[1]-5,8,10,2);ctx.fill();ctx.stroke()});
  // cloud
- ctx.fillStyle='#0d1626';ctx.strokeStyle='#3a4a63';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(cloud.x,cy,cloud.rx,cloud.ry,0,0,7);ctx.fill();ctx.stroke();
- ctx.fillStyle='#e2e8f0';ctx.font='600 13px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText('Internet',cloud.x,cy+1);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('WAN',cloud.x,cy+15);ctx.textAlign='left';
+ const cx=cloud.x,cc=[[-30,8,22],[-10,-10,28],[18,-6,24],[34,10,18],[2,14,24]];
+ ctx.fillStyle='#3a4a63';cc.forEach(c=>{ctx.beginPath();ctx.arc(cx+c[0],cy+c[1],c[2]+2,0,7);ctx.fill()});ctx.fillStyle='#0d1626';cc.forEach(c=>{ctx.beginPath();ctx.arc(cx+c[0],cy+c[1],c[2],0,7);ctx.fill()});
+ ctx.fillStyle='#e2e8f0';ctx.font='600 13px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText('INTERNET',cx,cy+4);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('standalone · WAN',cx,cy+60);ctx.textAlign='left';
  // firewall appliance
- const col=blocked?'#ef4444':'#22c55e';
+ const blocked=anyB(),col=blocked?'#ef4444':'#22c55e';
  ctx.fillStyle=blocked?'#1a0d12':'#0c1a14';rr(FW.x,FW.y,FW.w,FW.h,8);ctx.fill();
  ctx.save();rr(FW.x,FW.y,FW.w,FW.h,8);ctx.clip();ctx.strokeStyle=blocked?'rgba(239,68,68,.2)':'rgba(34,197,94,.12)';ctx.lineWidth=1;ctx.beginPath();
  for(let y=FW.y+18;y<FW.y+FW.h;y+=18){line(FW.x,y,FW.x+FW.w,y);for(let x=FW.x+(((y-FW.y)/18)%2?0:22);x<FW.x+FW.w;x+=44)line(x,y-18,x,y)}ctx.stroke();ctx.restore();
@@ -114,8 +117,11 @@ function draw(){
  ctx.font='700 12px ui-monospace,monospace';ctx.fillText(blocked?'● BLOCKING':'● ALLOWING',mx,FW.y+50);
  ctx.fillStyle='#4ade80';ctx.font='10.5px ui-monospace,monospace';ctx.fillText('passed '+stats.pass,mx,FW.y+72);
  ctx.fillStyle='#f87171';ctx.fillText('dropped '+stats.drop,mx,FW.y+90);
- ctx.fillStyle='#94a3b8';ctx.font='10px ui-monospace,monospace';ctx.fillText('click to '+(blocked?'ALLOW':'BLOCK'),mx,FW.y+124);ctx.textAlign='left';
+ ctx.fillStyle='#94a3b8';ctx.font='10px ui-monospace,monospace';ctx.fillText('click: '+(rules.attack?'allow':'block')+' Kali',mx,FW.y+124);ctx.textAlign='left';
  for(let i=0;i<8;i++){const a=Math.sin(T*(4+i*1.3)+i*2)>.1;led(FW.x+17+i*13.7,FW.y+FW.h-22,blocked?'#ef4444':(i%3==2?'#f59e0b':'#22c55e'),2.8,a?1:.2)}
+ // firewall rule buttons
+ const RB=rb();ctx.textAlign='center';ctx.fillStyle='#94a3b8';ctx.font='9px ui-monospace,monospace';ctx.fillText('FIREWALL RULES · CLICK TO TOGGLE',mx,RB[0].y-7);
+ RB.forEach(b=>{const o=rules[b.k];ctx.fillStyle=o?'#1a0d12':'#0c1a14';rr(b.x,b.y,b.w,b.h,6);ctx.fill();ctx.strokeStyle=o?'#ef4444':'#22c55e';ctx.lineWidth=1.5;rr(b.x,b.y,b.w,b.h,6);ctx.stroke();ctx.fillStyle='#e2e8f0';ctx.font='600 10.5px ui-monospace,monospace';ctx.fillText(b.t,b.x+b.w/2,b.y+15);ctx.fillStyle=o?'#f87171':'#4ade80';ctx.font='700 10px ui-monospace,monospace';ctx.fillText(o?'✗ BLOCKED':'✓ ALLOWED',b.x+b.w/2,b.y+29)});ctx.textAlign='left';
  // switch
  ctx.fillStyle='#0d1626';ctx.strokeStyle='#3b5b8c';ctx.lineWidth=1.5;rr(SW.x,SW.y,SW.w,SW.h,8);ctx.fill();ctx.stroke();
  ctx.fillStyle='#93c5fd';ctx.font='600 13px ui-monospace,monospace';ctx.fillText('vSwitch',SW.x+14,SW.y+30);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('VM Network',SW.x+14,SW.y+48);
@@ -125,21 +131,23 @@ function draw(){
  ctx.fillStyle='#ef4444';ctx.font='10px ui-monospace,monospace';ctx.fillText('via Internet → Firewall → vSwitch',K.x,K.y+K.h+18);
 }
 function hit(e){const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;return x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h}
-cv.addEventListener('click',e=>{if(hit(e))toggleFw()});
-cv.addEventListener('mousemove',e=>{cv.style.cursor=hit(e)?'pointer':'default'});
+function rb(){const F=G.FW,x=F.x+F.w/2-88;return[{k:'attack',t:'Kali → lab (attack)',x,y:F.y+F.h+24,w:176,h:36},{k:'shell',t:'Lab → Internet (outbound)',x,y:F.y+F.h+68,w:176,h:36}]}
+function btn(e){const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;return rb().find(b=>x>b.x&&x<b.x+b.w&&y>b.y&&y<b.y+b.h)}
+cv.addEventListener('click',e=>{const b=btn(e);if(b)toggleRule(b.k);else if(hit(e))toggleFw()});
+cv.addEventListener('mousemove',e=>{cv.style.cursor=(hit(e)||btn(e))?'pointer':'default'});
 let last=performance.now();
 function frame(now){
  const dt=Math.min(.05,(now-last)/1000);last=now;T=now/1000;
  if(!paused){
   FLOWS.forEach(f=>{if(!on[f.id])return;acc[f.id]=(acc[f.id]||0)+dt*f.rate;
-   while(acc[f.id]>=1){acc[f.id]--;pk.push({f,d:0,tag:f.tags[Math.random()*f.tags.length|0],v:200+Math.random()*60})}});
+   while(acc[f.id]>=1){acc[f.id]--;pk.push({f,d:0,from:f.from?f.from[Math.random()*f.from.length|0]:f.path[0],to:f.to?f.to[Math.random()*f.to.length|0]:f.path[1],tag:f.tags[Math.random()*f.tags.length|0],v:200+Math.random()*60})}});
   Object.values(NODES).forEach(n=>{n.cpu=Math.max(8,Math.min(95,n.cpu+(Math.random()-.5)*60*dt));n.mem=Math.max(20,Math.min(90,n.mem+(Math.random()-.5)*20*dt))});
-  for(let i=pk.length-1;i>=0;i--){const p=pk[i],r=route(p.f);p.pts=r.pts;p.d+=p.v*dt;
+  for(let i=pk.length-1;i>=0;i--){const p=pk[i],r=route(p.f,p.to,p.from);p.pts=r.pts;p.d+=p.v*dt;
    if(r.fw>=0&&!p.chk&&p.d>=r.fw){p.chk=1;
-    if(blocked){const [x,y]=at(p.pts,r.fw);fx.push({x,y,life:1});stats.drop++;fwF=1;pk.splice(i,1);continue}
+    if(rules[p.f.id]){const [x,y]=at(p.pts,r.fw);fx.push({x,y,life:1});stats.drop++;fwF=1;pk.splice(i,1);continue}
     stats.pass++}
    if(!p.swd&&p.d>=r.swd){p.swd=1;swF=1}
-   if(p.d>=plen(p.pts)){NODES[p.f.path[1]].flash=1;pk.splice(i,1)}}
+   if(p.d>=plen(p.pts)){NODES[p.to].flash=1;pk.splice(i,1)}}
   fx.forEach(e=>e.life-=dt*.8);for(let i=fx.length-1;i>=0;i--)if(fx[i].life<=0)fx.splice(i,1);
  }
  draw();
