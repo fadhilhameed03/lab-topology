@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lab Topology · Firewall Packet Simulation</title>
+<style>
+:root{color-scheme:dark;--bg:#0b111a;--panel:#0f1724;--line:#1f2b3d;--tx:#cbd5e1;--mut:#64748b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+header{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{margin:0;font-size:13px;letter-spacing:.18em;font-weight:500;color:var(--mut)}
+.leg{display:flex;flex-wrap:wrap;gap:8px}
+.chip{cursor:pointer;user-select:none;border:1px solid var(--line);background:transparent;color:var(--tx);padding:5px 10px;border-radius:6px;font:inherit;display:flex;align-items:center;gap:7px}
+.chip i{width:16px;height:3px;border-radius:2px;background:var(--c)}
+.chip.off{opacity:.35}
+#fwb{font-weight:600}
+#fwb.allow{border-color:#22c55e;color:#4ade80}
+#fwb.block{border-color:#ef4444;color:#f87171}
+.wrap{overflow-x:auto}
+canvas{display:block;min-width:1100px;width:100%;height:600px}
+#log{min-width:1060px;margin:0 22px 18px;padding:10px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);height:130px;overflow:hidden;line-height:1.7;color:var(--mut)}
+#log b{font-weight:600}
+</style></head><body>
+<header><h1>PHYSICAL TOPOLOGY · LIVE PACKET SIMULATION · CLICK THE FIREWALL TO BLOCK / ALLOW</h1>
+<div class="leg" id="leg"></div></header>
+<div class="wrap"><canvas id="c"></canvas><div id="log"></div></div>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d'),logEl=document.getElementById('log');
+const NODES={
+ kali:{name:'Kali Linux',role:'ATTACKER · OFFENSIVE · EXTERNAL',ip:'192.168.1.47',host:'kali',spec:'4 vCPU · 8 GB · 120 GB',c:'#ef4444'},
+ agent:{name:'Ubuntu (agent)',role:'MONITORING & DEFENSIVE CONTROLS',ip:'192.168.1.46',host:'Ubuntu_agent',spec:'4 vCPU · 8 GB · 75 GB',c:'#3b82f6'},
+ msf:{name:'Metasploitable 2',role:'INTENTIONALLY VULNERABLE TARGET',ip:'192.168.1.48',host:'Metasploitable2',spec:'1 vCPU · 1 GB · 8 GB',c:'#f97316'},
+ soc:{name:'Ubuntu (SOC)',role:'SIEM & INCIDENT RESPONSE',ip:'192.168.1.45',host:'Ubuntu_SOC',spec:'4 vCPU · 8 GB · 100 GB',c:'#22c55e'}
+};
+const VMS=['agent','msf','soc'];
+const FLOWS=[
+ {id:'attack',label:'attack (inbound)',c:'#ef4444',path:['kali','msf'],rate:2.2,msgs:['tcp/445 SMB exploit','tcp/21 vsftpd backdoor','tcp/80 nmap -sV scan','tcp/3632 distcc exec','tcp/1524 bindshell','tcp/6667 unrealircd']},
+ {id:'shell',label:'reverse shell (outbound)',c:'#a855f7',path:['msf','kali'],rate:.7,msgs:['tcp/4444 reverse shell','tcp/443 C2 beacon']},
+ {id:'wazuh',label:'agent telemetry',c:'#3b82f6',path:['agent','soc'],rate:1.2,msgs:['tcp/1514 agent events','tcp/1515 keepalive','tcp/1514 FIM + logs']},
+ {id:'mirror',label:'monitor / mirror',c:'#f59e0b',path:['msf','agent'],rate:.9,msgs:['SPAN copy of target traffic','pcap stream to sensor']},
+ {id:'alert',label:'alert / response',c:'#22c55e',path:['soc','agent'],rate:.5,msgs:['active-response command','rule + decoder update']}
+];
+const on={};FLOWS.forEach(f=>on[f.id]=true);
+const leg=document.getElementById('leg');
+FLOWS.forEach(f=>{const b=document.createElement('button');b.className='chip';b.style.setProperty('--c',f.c);b.innerHTML='<i></i>'+f.label;b.onclick=()=>{on[f.id]=!on[f.id];b.classList.toggle('off',!on[f.id])};leg.appendChild(b)});
+let paused=false,blocked=false;const stats={pass:0,drop:0};
+const fwb=document.createElement('button');fwb.className='chip allow';fwb.id='fwb';leg.appendChild(fwb);
+function setFw(){fwb.className='chip '+(blocked?'block':'allow');fwb.textContent='firewall: '+(blocked?'BLOCKING':'ALLOWING')}
+function toggleFw(){blocked=!blocked;setFw();addRaw(`<b style="color:${blocked?'#f87171':'#4ade80'}">[firewall]</b> policy changed → ${blocked?'BLOCK all traffic crossing the firewall':'ALLOW traffic'}`)}
+fwb.onclick=toggleFw;setFw();
+const pb=document.createElement('button');pb.className='chip';pb.textContent='pause';pb.onclick=()=>{paused=!paused;pb.textContent=paused?'resume':'pause'};leg.appendChild(pb);
+
+let W=0,H=0,G={};
+function layout(){
+ const dpr=window.devicePixelRatio||1;W=cv.clientWidth;H=cv.clientHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);
+ const cy=H/2+8,vx=770,vw=W-vx-44,vh=130;
+ G={cy,K:{x:24,w:200,y:cy-70,h:140},cloud:{x:304,rx:48,ry:32},FW:{x:410,w:130,y:cy-90,h:180},SW:{x:612,w:104,y:cy-45,h:90},bx:742,vx,vw,vh};
+ G.K.cy=cy;G.K.R=G.K.x+G.K.w;
+ VMS.forEach((k,i)=>{const n=NODES[k];n.x=vx;n.y=96+i*(vh+20);n.w=vw;n.h=vh;n.cy=n.y+vh/2;n.flash=0});
+ NODES.kali.flash=NODES.kali.flash||0;
+}
+function route(f){
+ const [a,b]=f.path,{K,FW,SW,bx,cy}=G,A=NODES[a],B=NODES[b];let pts,fw=-1,sw=3;
+ if(a==='kali'){pts=[[K.R,cy],[FW.x,cy],[FW.x+FW.w,cy],[SW.x,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];fw=1}
+ else if(b==='kali'){pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[SW.x,cy],[FW.x+FW.w,cy],[FW.x,cy],[K.R,cy]];fw=5;sw=3}
+ else pts=[[A.x,A.cy],[bx,A.cy],[bx,cy],[SW.x+SW.w,cy],[bx,cy],[bx,B.cy],[B.x,B.cy]];
+ return{pts,fw:fw<0?-1:dist(pts,fw),sw:dist(pts,sw)}
+}
+function dist(p,idx){let t=0;for(let i=1;i<=idx;i++)t+=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);return t}
+function plen(p){return dist(p,p.length-1)}
+function at(p,d){for(let i=1;i<p.length;i++){const l=Math.hypot(p[i][0]-p[i-1][0],p[i][1]-p[i-1][1]);if(d<=l||i==p.length-1){const u=l?Math.min(d/l,1):0;return[p[i-1][0]+(p[i][0]-p[i-1][0])*u,p[i-1][1]+(p[i][1]-p[i-1][1])*u]}d-=l}return p[0]}
+const pk=[],acc={},fx=[],logs=[];let swF=0,fwF=0;
+function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r)}
+function fit(t,w,px){const m=Math.floor(w/px);return t.length>m?t.slice(0,m-1)+'…':t}
+function card(n,x,y,w,h){
+ ctx.fillStyle='#0f1724';rr(x,y,w,h,8);ctx.fill();
+ ctx.strokeStyle=n.c;ctx.globalAlpha=.35+.65*n.flash;ctx.lineWidth=1.4+1.6*n.flash;rr(x,y,w,h,8);ctx.stroke();ctx.globalAlpha=1;
+ ctx.fillStyle=n.c;ctx.fillRect(x,y+8,4,h-16);
+ ctx.fillStyle='#e2e8f0';ctx.font='600 14px ui-monospace,monospace';ctx.fillText(n.name,x+16,y+26);
+ ctx.fillStyle='#64748b';ctx.font='9.5px ui-monospace,monospace';ctx.fillText(fit(n.role,w-24,5.8),x+16,y+42);
+ ctx.fillStyle=n.c;ctx.font='600 13px ui-monospace,monospace';ctx.fillText(n.ip,x+16,y+70);
+ ctx.fillStyle='#94a3b8';ctx.font='11px ui-monospace,monospace';ctx.fillText('host: '+n.host,x+16,y+94);ctx.fillText(n.spec,x+16,y+114);
+ n.flash=Math.max(0,n.flash-.03)}
+function line(x1,y1,x2,y2){ctx.moveTo(x1,y1);ctx.lineTo(x2,y2)}
+function draw(){
+ const {cy,K,FW,SW,bx,cloud}=G;ctx.clearRect(0,0,W,H);ctx.textAlign='left';
+ // Internet zone
+ ctx.setLineDash([6,5]);ctx.strokeStyle='#5b2a2a';ctx.lineWidth=1.2;rr(14,cy-130,FW.x-44,260,12);ctx.stroke();ctx.setLineDash([]);
+ ctx.fillStyle='#ef4444';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('INTERNET · UNTRUSTED ZONE',30,cy-108);
+ // ESXi frame
+ const ex=580;ctx.strokeStyle='#26354d';ctx.lineWidth=1.2;rr(ex,56,W-ex-24,H-80,12);ctx.stroke();
+ ctx.fillStyle='#1e3a5f';rr(ex+14,44,150,24,5);ctx.fill();ctx.fillStyle='#cbd5e1';ctx.font='600 11px ui-monospace,monospace';ctx.fillText('VMware ESXi 7.0 U2 Host',ex+24,60);
+ ctx.fillStyle='#64748b';ctx.font='11px ui-monospace,monospace';ctx.textAlign='right';ctx.fillText('Isolated Lab Network · 192.168.1.0/24',W-36,78);ctx.textAlign='left';
+ // links
+ ctx.strokeStyle='#26354d';ctx.lineWidth=2;ctx.beginPath();
+ line(K.R,cy,FW.x,cy);line(FW.x+FW.w,cy,SW.x,cy);line(SW.x+SW.w,cy,bx,cy);line(bx,NODES.agent.cy,bx,NODES.soc.cy);VMS.forEach(k=>line(bx,NODES[k].cy,NODES[k].x,NODES[k].cy));ctx.stroke();
+ // cloud
+ ctx.fillStyle='#0d1626';ctx.strokeStyle='#3a4a63';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(cloud.x,cy,cloud.rx,cloud.ry,0,0,7);ctx.fill();ctx.stroke();
+ ctx.fillStyle='#e2e8f0';ctx.font='600 13px ui-monospace,monospace';ctx.textAlign='center';ctx.fillText('Internet',cloud.x,cy+1);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('WAN',cloud.x,cy+15);ctx.textAlign='left';
+ // firewall
+ const col=blocked?'#ef4444':'#22c55e';
+ ctx.fillStyle=blocked?'#1a0d12':'#0c1a14';rr(FW.x,FW.y,FW.w,FW.h,8);ctx.fill();
+ ctx.save();rr(FW.x,FW.y,FW.w,FW.h,8);ctx.clip();ctx.strokeStyle=blocked?'rgba(239,68,68,.22)':'rgba(34,197,94,.14)';ctx.lineWidth=1;ctx.beginPath();
+ for(let y=FW.y+18;y<FW.y+FW.h;y+=18){line(FW.x,y,FW.x+FW.w,y);for(let x=FW.x+(((y-FW.y)/18)%2?0:22);x<FW.x+FW.w;x+=44)line(x,y-18,x,y)}ctx.stroke();ctx.restore();
+ ctx.strokeStyle=col;ctx.lineWidth=2+2*fwF;rr(FW.x,FW.y,FW.w,FW.h,8);ctx.stroke();fwF=Math.max(0,fwF-.04);
+ ctx.fillStyle='#0b111a';rr(FW.x+10,FW.y+10,FW.w-20,92,6);ctx.fill();
+ ctx.textAlign='center';const mx=FW.x+FW.w/2;
+ ctx.fillStyle=col;ctx.font='700 14px ui-monospace,monospace';ctx.fillText('FIREWALL',mx,FW.y+30);
+ ctx.font='700 12px ui-monospace,monospace';ctx.fillText(blocked?'● BLOCKING':'● ALLOWING',mx,FW.y+50);
+ ctx.fillStyle='#4ade80';ctx.font='10.5px ui-monospace,monospace';ctx.fillText('passed '+stats.pass,mx,FW.y+72);
+ ctx.fillStyle='#f87171';ctx.fillText('dropped '+stats.drop,mx,FW.y+90);
+ ctx.fillStyle='#94a3b8';ctx.font='10px ui-monospace,monospace';ctx.fillText('click to',mx,FW.y+128);ctx.fillText(blocked?'ALLOW':'BLOCK',mx,FW.y+142);ctx.textAlign='left';
+ // switch
+ ctx.fillStyle='#0d1626';ctx.strokeStyle='#3b5b8c';ctx.lineWidth=1.5;rr(SW.x,SW.y,SW.w,SW.h,8);ctx.fill();ctx.stroke();
+ ctx.fillStyle='#93c5fd';ctx.font='600 13px ui-monospace,monospace';ctx.fillText('vSwitch',SW.x+14,SW.y+34);ctx.fillStyle='#64748b';ctx.font='10px ui-monospace,monospace';ctx.fillText('VM Network',SW.x+14,SW.y+54);
+ if(swF>0){ctx.strokeStyle='rgba(147,197,253,'+swF+')';ctx.lineWidth=2;rr(SW.x-3,SW.y-3,SW.w+6,SW.h+6,10);ctx.stroke()}swF=Math.max(0,swF-.05);
+ card(NODES.kali,K.x,K.y,K.w,K.h);VMS.forEach(k=>{const n=NODES[k];card(n,n.x,n.y,n.w,n.h)});
+ ctx.fillStyle='#ef4444';ctx.font='10px ui-monospace,monospace';ctx.fillText('via Internet → Firewall → vSwitch',K.x,K.y+K.h+18);
+}
+function addRaw(h){logs.push(`<span style="color:var(--mut)">${new Date().toLocaleTimeString('en-GB')}</span> ${h}`);if(logs.length>6)logs.shift();logEl.innerHTML=logs.join('<br>')}
+function addLog(f,m,a,b,tag){addRaw(`<b style="color:${f.c}">[${f.label}]</b> ${NODES[a].ip} → ${NODES[b].ip} · ${m}${tag||''}`)}
+cv.addEventListener('click',e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;if(x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h)toggleFw()});
+cv.addEventListener('mousemove',e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,F=G.FW;cv.style.cursor=(x>F.x&&x<F.x+F.w&&y>F.y&&y<F.y+F.h)?'pointer':'default'});
+let last=performance.now();
+function frame(now){
+ const dt=Math.min(.05,(now-last)/1000);last=now;
+ if(!paused){
+  FLOWS.forEach(f=>{if(!on[f.id])return;acc[f.id]=(acc[f.id]||0)+dt*f.rate;
+   while(acc[f.id]>=1){acc[f.id]--;pk.push({f,d:0,m:f.msgs[Math.random()*f.msgs.length|0],v:200+Math.random()*60})}});
+  for(let i=pk.length-1;i>=0;i--){const p=pk[i],r=route(p.f);Object.assign(p,r);p.pts=r.pts;p.d+=p.v*dt;
+   if(p.fw>=0&&!p.chk&&p.d>=p.fw){p.chk=1;
+    if(blocked){const [x,y]=at(p.pts,p.fw);fx.push({x,y,life:1});stats.drop++;fwF=1;addLog(p.f,p.m,p.f.path[0],p.f.path[1],' <b style="color:#f87171">— DROPPED at firewall</b>');pk.splice(i,1);continue}
+    stats.pass++}
+   if(!p.sw&&p.d>=p.sw){p.sw=1}
+   if(!p.swd&&p.d>=r.sw){p.swd=1;swF=1}
+   if(p.d>=plen(p.pts)){NODES[p.f.path[1]].flash=1;addLog(p.f,p.m,p.f.path[0],p.f.path[1],p.fw>=0?' <b style="color:#4ade80">✓ passed firewall</b>':'');pk.splice(i,1)}}
+  fx.forEach(e=>e.life-=dt*.8);for(let i=fx.length-1;i>=0;i--)if(fx[i].life<=0)fx.splice(i,1);
+ }
+ draw();
+ pk.forEach(p=>{for(let k=9;k>=0;k--){const d=p.d-k*7;if(d<0)continue;const [x,y]=at(p.pts,d);ctx.globalAlpha=(1-k/10)*.9;ctx.fillStyle=p.f.c;ctx.beginPath();ctx.arc(x,y,k?3.2-k*.18:4.6,0,7);ctx.fill()}ctx.globalAlpha=1});
+ fx.forEach(e=>{ctx.globalAlpha=Math.max(0,e.life);ctx.strokeStyle='#ef4444';ctx.lineWidth=3;const s=7+(1-e.life)*8;ctx.beginPath();line(e.x-s,e.y-s,e.x+s,e.y+s);line(e.x-s,e.y+s,e.x+s,e.y-s);ctx.stroke();ctx.globalAlpha=1});
+ requestAnimationFrame(frame)}
+addEventListener('resize',layout);layout();requestAnimationFrame(frame);
+</script></body></html>
